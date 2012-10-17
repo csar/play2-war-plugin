@@ -9,6 +9,8 @@ trait Play2WarSettings {
   this: Play2WarCommands =>
 
   lazy val play2WarSettings = Seq[Setting[_]](
+      
+    disableWebXmlNotFoundWarning <<= disableWebXmlNotFoundWarning ?? false,
     
     libraryDependencies <++= (servletVersion) { (v) =>
       val servletVersionString = v match {

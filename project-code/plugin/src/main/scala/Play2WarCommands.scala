@@ -7,8 +7,7 @@ import java.util.jar.Manifest
 
 import scala.collection.immutable.Stream.consWrapper
 
-import com.github.play2war.plugin.Play2WarKeys.servletVersion
-import com.github.play2war.plugin.Play2WarKeys.webappResource
+import com.github.play2war.plugin.Play2WarKeys._
 
 import sbt.ConfigKey.configurationToKey
 import sbt.Keys.TaskStreams
@@ -29,28 +28,28 @@ import sbt.Path
 trait Play2WarCommands extends sbt.PlayCommands with sbt.PlayReloader {
 
   val manifestRegex = """(?i).*META-INF/MANIFEST.MF"""
-    
-    def getFiles(root: File, skipHidden: Boolean = true): Stream[File] =  
-      if (!root.exists || (skipHidden && root.isHidden) || 
-          manifestRegex.r.pattern.matcher(root.getAbsolutePath()).matches()) Stream.empty  
-      else root #:: ( 
-        root.listFiles match { 
-          case null => Stream.empty 
-          case files => files.toStream.flatMap(getFiles(_, skipHidden)) 
+
+  def getFiles(root: File, skipHidden: Boolean = true): Stream[File] =
+    if (!root.exists || (skipHidden && root.isHidden) ||
+      manifestRegex.r.pattern.matcher(root.getAbsolutePath()).matches()) Stream.empty
+    else root #:: (
+      root.listFiles match {
+        case null => Stream.empty
+        case files => files.toStream.flatMap(getFiles(_, skipHidden))
       })
 
-  val warTask = (playPackageEverything, dependencyClasspath in Runtime, target, normalizedName, version, webappResource, streams, servletVersion) map {
-    (packaged, dependencies, target, id, version, webappResource, s, servletVersion) =>
+  val warTask = (playPackageEverything, dependencyClasspath in Runtime, target, normalizedName, version, webappResource, streams, servletVersion, disableWebXmlNotFoundWarning) map {
+    (packaged, dependencies, target, id, version, webappResource, s, servletVersion, disableWebXmlNotFoundWarning) =>
 
       s.log.info("Build WAR package for servlet container: " + servletVersion)
-    
+
       import sbt.NameFilter._
 
       val warDir = target
       val packageName = id + "-" + version
       val war = warDir / (packageName + ".war")
       val manifestString = "Manifest-Version: 1.0\n"
-        
+
       s.log.info("Packaging " + war.getCanonicalPath + " ...")
 
       IO.createDirectory(warDir)
@@ -69,24 +68,24 @@ trait Play2WarCommands extends sbt.PlayCommands with sbt.PlayReloader {
           dependency.data -> path
         } ++ packaged.map(jar => jar -> ("WEB-INF/lib/" + jar.getName))
       }
-      
-      libs.foreach { l => 
+
+      libs.foreach { l =>
         s.log.debug("Embedding dependency " + l._1 + " -> " + l._2)
       }
 
       val webxmlFolder = webappResource / "WEB-INF"
       val webxml = webxmlFolder / "web.xml"
-      
+
       // Web.xml generation
       servletVersion match {
         case "2.5" => {
-          
-            if (webxml.exists) {
-              s.log.info("WEB-INF/web.xml found.")
-            } else {
-              s.log.info("WEB-INF/web.xml not found, generate it in " + webxmlFolder)
-              IO.write(webxml,
-                """<?xml version="1.0" ?>
+
+          if (webxml.exists) {
+            s.log.info("WEB-INF/web.xml found.")
+          } else {
+            s.log.info("WEB-INF/web.xml not found, generate it in " + webxmlFolder)
+            IO.write(webxml,
+              """<?xml version="1.0" ?>
 <web-app xmlns="http://java.sun.com/xml/ns/javaee"
         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
         xsi:schemaLocation="http://java.sun.com/xml/ns/javaee http://java.sun.com/xml/ns/javaee/web-app_2_5.xsd"
@@ -110,46 +109,44 @@ trait Play2WarCommands extends sbt.PlayCommands with sbt.PlayReloader {
 
 </web-app>
 """ /* */ )
-            }
-            
+          }
+
         }
-        
-        case "3.0" => //handleWebXmlFileOnServlet30(webxml, s)
-        
+
+        case "3.0" => handleWebXmlFileOnServlet30(webxml, s, disableWebXmlNotFoundWarning)
+
         case unknown => {
-            s.log.warn("Unknown servlet container version: " + unknown + ". Force default 3.0 version")
-            handleWebXmlFileOnServlet30(webxml, s)
+          s.log.warn("Unknown servlet container version: " + unknown + ". Force default 3.0 version")
+          handleWebXmlFileOnServlet30(webxml, s)
         }
       }
 
       // Webapp resources
       s.log.debug("Webapp resources directory: " + webappResource.getAbsolutePath)
-      
+
       val filesToInclude = getFiles(webappResource).filter(f => f.isFile)
-      
+
       val additionnalResources = filesToInclude.map { f =>
         f -> Path.relativizeFile(webappResource, f).get.getPath
       }
-          
-      additionnalResources.foreach { r => 
+
+      additionnalResources.foreach { r =>
         s.log.debug("Embedding " + r._1 + " -> /" + r._2)
       }
 
       val metaInfFolder = webappResource / "META-INF"
-      val manifest  = if (metaInfFolder.exists()) {
-        val option = metaInfFolder.listFiles.find(f => 
+      val manifest = if (metaInfFolder.exists()) {
+        val option = metaInfFolder.listFiles.find(f =>
           manifestRegex.r.pattern.matcher(f.getAbsolutePath()).matches());
-        if (option.isDefined){
+        if (option.isDefined) {
           new Manifest(new FileInputStream(option.get))
+        } else {
+          new Manifest(new ByteArrayInputStream(manifestString.getBytes))
         }
-        else {
-      	  new Manifest(new ByteArrayInputStream(manifestString.getBytes))            
-        }
-      }
-      else {
+      } else {
         new Manifest(new ByteArrayInputStream(manifestString.getBytes))
-      } 
-      
+      }
+
       // Package final jar
       val jarContent = libs ++ additionnalResources;
 
@@ -159,8 +156,8 @@ trait Play2WarCommands extends sbt.PlayCommands with sbt.PlayReloader {
 
       war
   }
-  
-  def handleWebXmlFileOnServlet30(webxml: File, s: TaskStreams) = {
+
+  def handleWebXmlFileOnServlet30(webxml: File, s: TaskStreams, disableWarning: Boolean = false) = {
     if (webxml.exists) {
       s.log.warn("WEB-INF/web.xml found! As WAR package will be built for servlet 3.0 containers, check if this web.xml file is compatible with.")
     }
